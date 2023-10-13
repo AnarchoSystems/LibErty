@@ -16,9 +16,6 @@ public struct Free<Meta, T> {
         .init(kind: .free(meta, trafo))
     }
     
-    static func lift(_ meta: Meta) -> Self {
-        .free(meta) {any in .pure(any as! T)}
-    }
 }
 
 public protocol Parser {
@@ -107,6 +104,9 @@ public extension Runner {
 infix operator |> : AdditionPrecedence
 
 public extension Free {
+    static func lift(_ meta: Meta) -> Self {
+        .free(meta) {any in .pure(any as! T)}
+    }
     func erased() -> Free<Meta, Any> {
         flatMap{.pure($0)}
     }
