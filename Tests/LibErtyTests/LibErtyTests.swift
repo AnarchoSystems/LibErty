@@ -3,48 +3,60 @@ import XCTest
 
 final class LibErtyTests: XCTestCase {}
 
-enum Console {
+protocol Print {
+    static func print(_ arg: String) -> Self
+}
+protocol ReadLn {
+    static var readLn : Self {get}
+}
+
+typealias Console = Print & ReadLn
+
+enum MyConsole : Console {
     case print(String)
     case readLn
 }
 
-func print(_ arg: String) -> Free<Console, Void> {.lift(.print(arg))}
-func readLn() -> Free<Console, String> {.lift(.readLn)}
+func print<C : Print>(_ arg: String) -> Free<C, Void> {.lift(.print(arg))}
+func readLn<C : ReadLn>() -> Free<C, String> {.lift(.readLn)}
 
-protocol ConsoleRunner : Runner where Meta == Console {
-    mutating func runPrint(_ arg: String)
-    func runReadLn() -> String
-}
-
-extension ConsoleRunner {
-    mutating func runUnsafe(_ meta: Console) -> Any {
-        switch meta {
-        case .print(let string):
-            runPrint(string)
-        case .readLn:
-            runReadLn()
-        }
-    }
+protocol ConsoleRunner {
+    mutating func runPrint(_ arg: String) async throws
+    mutating func runReadLn() async throws -> String
 }
 
 func greet(_ name: String) -> String {"Hello, \(name)!"}
-func identity<T>(_ arg: T) -> T {arg}
 
 extension LibErtyTests {
-    func testExample() async throws {
+    func testExample() {
         
-        let prog = print("What's your name?") |> readLn |> greet |> print
-        
-        let parsed = embed(prog, identity)
+        let prog : Free<MyConsole, Void> = print("What's your name?") |> readLn |> greet |> print
         
         struct MyRunner : ConsoleRunner {
+            
             var console : [String] = []
+            
             mutating func runPrint(_ arg: String) { console.append(arg) }
             func runReadLn() -> String { "Markus" }
+            
+            mutating func runProg<T>(_ free: Free<MyConsole, T>) -> T {
+                switch free.kind {
+                case .pure(let t):
+                    t
+                case .free(let meta, let then):
+                    switch meta {
+                    case .print(let string):
+                        runProg(then(runPrint(string)))
+                    case .readLn:
+                        runProg(then(runReadLn()))
+                    }
+                }
+            }
+            
         }
         
         var runner = MyRunner()
-        try await runner.runUnsafe(parsed)
+        runner.runProg(prog)
         
         
         XCTAssertEqual(runner.console, ["What's your name?", "Hello, Markus!"])
@@ -113,7 +125,7 @@ protocol InteractionRunner : Runner where Meta == Interaction {
 }
 
 extension InteractionRunner {
-    mutating func runUnsafe(_ meta: Interaction) async throws -> Any {
+    mutating func runCommand(_ meta: Interaction) async throws -> Any {
         switch meta {
         case .look(let direction):
             runLook(direction)
@@ -159,7 +171,196 @@ struct EasyToAngerRunner : InteractionRunner {
 extension LibErtyTests {
     func testEasyToAnger() async throws {
         var runner = EasyToAngerRunner()
-        try await runner.runUnsafe(easyToAnger())
+        try await runner.runProg(easyToAnger())
         XCTAssertEqual(runner.console, ["Take that!"])
+    }
+}
+
+
+enum Failure {
+    case fail(Error)
+}
+
+func fail<T>(_ error: Error) -> Free<Failure, T> {.lift(.fail(error))}
+
+struct DivisionByZero : Error {}
+
+func failableDivision(_ a: Int, _ b: Int) -> Free<Failure, Int> {
+    guard b != 0 else {return fail(DivisionByZero())}
+    return .pure(a/b)
+}
+
+func toResult<T>(_ free: Free<Failure, T>) -> Result<T, Error> {
+    switch free.kind {
+    case .pure(let t):
+            .success(t)
+    case .free(let meta, _):
+        switch meta {
+        case .fail(let error):
+                .failure(error)
+        }
+    }
+}
+
+
+protocol DeepThought {
+    static func query(_ arg: String) -> Self
+}
+
+func query<DT : DeepThought>(_ arg: String) -> Free<DT, String> {.lift(.query(arg))}
+
+protocol ThoughtRunner {
+    mutating func runQuery(_ question: String) async throws -> String
+}
+
+func think<DT : DeepThought>(_ question: String) -> Free<DT, String> {
+    if question == "What is the answer to life, the universe and everything?" {
+        query(question) |> {answer in
+            answer == "42" ? .pure(answer) : think(question)
+        }
+    }
+    else {
+        query(question)
+    }
+}
+
+func consoleThought<DT : Console & DeepThought>() -> Free<DT, Void> {
+    print("Your question to Deep Thought:") |> readLn |> think |> print
+}
+
+enum MyThought : Console, DeepThought {
+    case print(String)
+    case readLn
+    case query(String)
+}
+
+extension LibErtyTests {
+    
+    func testDeepThought() {
+        
+        let thought : Free<MyThought, Void> = consoleThought()
+        
+        struct MyThoughtRunner : ConsoleRunner, ThoughtRunner {
+            
+            var console : [String] = []
+            
+            mutating func runPrint(_ arg: String) { console.append(arg) }
+            func runReadLn() -> String { "What is the answer to life, the universe and everything?" }
+            func runQuery(_ question: String) -> String { "42" }
+        
+            mutating func runThought<T>(_ thought: Free<MyThought, T>) -> T {
+                switch thought.kind {
+                case .pure(let t):
+                    t
+                case .free(let meta, let then):
+                    switch meta {
+                    case .print(let line):
+                        runThought(then(runPrint(line)))
+                    case .readLn:
+                        runThought(then(runReadLn()))
+                    case .query(let question):
+                        runThought(then(runQuery(question)))
+                    }
+                }
+            }
+            
+        }
+        
+        var runner = MyThoughtRunner()
+        runner.runThought(thought)
+        
+        XCTAssertEqual(["Your question to Deep Thought:", "42"], runner.console)
+        
+    }
+    
+}
+
+protocol RecorderCmd {
+    static var startRecording : Self {get}
+    static var stopRecording : Self {get}
+    static var getIsRecording : Self {get}
+}
+
+func startRecording<R : RecorderCmd>() -> Free<R, Void> {.lift(.startRecording)}
+func stopRecording<R : RecorderCmd>() -> Free<R, Void> {.lift(.stopRecording)}
+func getIsRecording<R : RecorderCmd>() -> Free<R, Bool> {.lift(.getIsRecording)}
+
+protocol RecorderRunner {
+    mutating func doStartRecording() async throws
+    mutating func doStopRecording() async throws
+    mutating func doGetIsRecording() async throws -> Bool
+}
+
+protocol RecorderSchedule {
+    static var getShouldBeRecording : Self {get}
+}
+
+func getShouldBeRecording<R : RecorderSchedule>() -> Free<R, Bool> {.lift(.getShouldBeRecording)}
+
+protocol RecorderScheduleRunner {
+    mutating func doGetShouldBeRecording() async throws -> Bool
+}
+
+func onRecorderEvent<R : RecorderCmd & RecorderSchedule>() -> Free<R, Void> {
+    getShouldBeRecording() |> {shouldBeRecording in
+        getIsRecording() |> {isRecording in
+            if isRecording == shouldBeRecording { .pure(()) }
+            else if shouldBeRecording { startRecording() }
+            else { stopRecording() }
+        }
+    }
+}
+
+enum TestRecorderCmd : RecorderCmd, RecorderSchedule {
+    case startRecording
+    case stopRecording
+    case getIsRecording
+    case getShouldBeRecording
+}
+
+struct TestRecorderRunner : RecorderRunner {
+    
+    var shouldBeRecording = false
+    var isRecording = false
+    
+    mutating func doStartRecording() {
+        isRecording = true
+    }
+    mutating func doStopRecording() {
+        isRecording = false
+    }
+    func doGetIsRecording() -> Bool {
+        isRecording
+    }
+    mutating func doRecord<T>(_ free: Free<TestRecorderCmd, T>) -> T {
+        switch free.kind {
+        case .pure(let t):
+            t
+        case .free(let meta, let then):
+            switch meta {
+            case .startRecording:
+                doRecord(then(doStartRecording()))
+            case .stopRecording:
+                doRecord(then(doStopRecording()))
+            case .getIsRecording:
+                doRecord(then(doGetIsRecording()))
+            case .getShouldBeRecording:
+                doRecord(then(shouldBeRecording))
+            }
+        }
+    }
+}
+
+extension LibErtyTests {
+    func testRecorder() {
+        
+        var recorder = TestRecorderRunner()
+        
+        for _ in 0..<100 {
+            recorder.shouldBeRecording = .random()
+            recorder.doRecord(onRecorderEvent())
+            XCTAssertEqual(recorder.isRecording, recorder.shouldBeRecording)
+        }
+        
     }
 }
